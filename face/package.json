@@ -1,0 +1,56 @@
+{
+  "name": "ha-plugin-face",
+  "author": "Skylar Sadlier",
+  "version": "1.0.0",
+  "description": "Home Assistant weather and entities through the Home Assistant WS plugin",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "HA Plugin Face",
+    "uuid": "2498bc8e-0bfe-4590-b187-b8023fdb2e43",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": true
+    },
+    "messageKeys": [
+      "ready",
+      "width",
+      "height",
+      "color",
+      "place",
+      "temp",
+      "cond",
+      "hilo",
+      "sun",
+      "hours",
+      "ent1",
+      "ent2",
+      "err",
+      "iconW",
+      "iconH",
+      "iconPal",
+      "iconPx",
+      "iconOff",
+      "iconSize"
+    ],
+    "resources": {
+      "media": []
+    },
+    "usesPermissions": [
+      "Location"
+    ]
+  }
+}

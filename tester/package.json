@@ -1,0 +1,69 @@
+{
+  "name": "ha-plugin-tester",
+  "author": "Skylar Sadlier",
+  "version": "1.0.0",
+  "description": "Reads every source and calls every action of the Home Assistant WS plugin",
+  "keywords": [
+    "pebble-app"
+  ],
+  "private": true,
+  "dependencies": {},
+  "pebble": {
+    "displayName": "HA Plugin Tester",
+    "uuid": "49b9c30b-9040-4839-931c-aba247483b36",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "aplite",
+      "basalt",
+      "chalk",
+      "diorite",
+      "emery",
+      "flint",
+      "gabbro"
+    ],
+    "watchapp": {
+      "watchface": false
+    },
+    "messageKeys": [
+      "cmd",
+      "screen",
+      "title",
+      "total",
+      "replace",
+      "first",
+      "text",
+      "width",
+      "height",
+      "palette",
+      "pixels",
+      "offset",
+      "sel",
+      "longsel",
+      "index",
+      "back",
+      "ready",
+      "color",
+      "mic",
+      "dictation"
+    ],
+    "resources": {
+      "media": []
+    },
+    "usesPermissions": [
+      "Location",
+      {
+        "name": "InvokeAction",
+        "plugin": "61ae3254-ce00-49db-aad8-23143f649b90"
+      },
+      {
+        "name": "Unlock",
+        "plugin": "61ae3254-ce00-49db-aad8-23143f649b90"
+      },
+      {
+        "name": "Assistant",
+        "plugin": "61ae3254-ce00-49db-aad8-23143f649b90"
+      }
+    ]
+  }
+}
