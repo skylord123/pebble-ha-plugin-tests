@@ -14,10 +14,11 @@ When you install either app, the Pebble app asks to let it use your location. Th
 
 ## HA Plugin Tester (watch app)
 
-Its menus are built from what the plugin declares, so a source or action added to the plugin shows up without a change here. Select opens a row; holding select shows the raw reply where there is one.
+Its menus are built from what the plugin declares, so a source or action added to the plugin shows up without a change here. Select opens a row; holding select shows the raw reply where there is one, except on an entity, where it does the entity's quick action as in the app (the raw reply is under **Id** once it is open). **Home** is the exception: it shows your entities the way the Home Assistant WS app does, so you can try the plugin the way an app would use it.
 
 | Menu | Tests |
 | --- | --- |
+| Home | The shared entities from `home/entity` (weather left out), live, with the name and the state under it. Select opens the entity's details page; holding select does its quick action, as in the app: lights, switches, fans, automations and the like toggle, scenes, scripts and buttons run, covers open or close, an unlocked lock locks, a disarmed alarm arms in the first mode it supports, selects go to their next option and counters count up. Anything else, or a lock that is locked or an alarm that is armed, opens its details instead. A short buzz means it worked; an error shows its code and message with a double buzz. |
 | Plugin & permissions | Whether the plugin is installed, every source and action with the permissions it requires of callers, other plugins on the phone, and what `Pebble.permissions.query` says for `Location`, `InvokeAction`, `Unlock` and `Assistant`. |
 | Entities | Every `home/*` source as a live list (it redraws when the plugin sends an update). Open an instance for each of its properties, and the actions that target that source with sample arguments. **Every action…** tries all of them on it, including ones meant for other kinds of entity. |
 | Weather | `weather/location` from the plugin by its UUID, from whichever plugin the phone prefers, without pictures, with 26 px pictures, current conditions only, and only what the watch's own weather reads. Open an instance and pick `condition` for its picture (hold for the icon), any series for its values one by one, and an hourly or daily condition for that hour's or day's picture. Instances whose id is a UUID are your weather locations. |
@@ -27,6 +28,27 @@ Its menus are built from what the plugin declares, so a source or action added t
 | Error cases | Calls that should be refused, each saying what it expects: unknown actions and sources, unshared entities, missing or wrong arguments, services `call_service` must refuse, a target in `data` (dropped), unlocking a lock through `call_service`, and the unlock and disarm gates. |
 
 `unlock`, `open` and `alarm_disarm` act on real things, so anywhere in the tester they only run when select is held.
+
+### Details pages
+
+Each page follows the entity's own `home/<item>` source while it is open, and stops when you leave it. They are modelled on the app's pages:
+
+| Kind | Rows |
+| --- | --- |
+| Light | The light (select toggles), Brightness, only when it can dim, and Color Temperature when it has that colour mode. Brightness uses `set_brightness`; colour temperature has no action of its own, so it goes through `call_service` `turn_on`. Both follow the dial as you turn it. |
+| Switch, fan, automation | The entity (select toggles), Speed for fans (`call_service` `set_percentage`), Trigger for automations (`activate`). |
+| Cover, valve | The state and position, Open (`set_on`; hold for the `open` action, which garage doors, gates and doors need), Close, Stop, and Position (`set_position`), each only when its `supported_features` has it. |
+| Climate, water heater | The summary (select toggles), Current, Target (`set_temperature` in the thermostat's own steps, or 0.5° and 1°F without one), or Low and High for a thermostat keeping a range, HVAC Mode (`set_hvac_mode`, offering the thermostat's own modes) and what it is doing. |
+| Media player | The state (select plays or pauses), Title, Artist, Play/Pause, Next, Previous, Volume (`set_volume`), and Turn On or Off. |
+| Lock | The state, Lock, and Unlock and Open on a long press. |
+| Alarm | The state, each arm mode it supports (`alarm_arm`), and Disarm on a long press. |
+| Scene, script, button | Run or Press (`activate`), Stop for a running script, and when it last ran. |
+| Sensor, binary sensor, person | The value or state, device class and when it changed; for a person the zone and since when. |
+| Anything else | The state and domain, Toggle when it has an on and off, and **Every action…**. |
+
+The last row of every page, **Properties & tests**, opens the same raw view the Entities menu has for that entity.
+
+Brightness, colour temperature, speed, position, temperature and volume are set with a number selector like the app's: big digits and a bar, up and down to adjust (hold to repeat, faster the longer you hold over a big range), select to set. It buzzes and closes when the value took, and stays up with the error when it did not. A value that changes in Home Assistant while it is open shows up in it, except for a second after you press a button.
 
 ## HA Plugin Face (watchface)
 

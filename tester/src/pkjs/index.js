@@ -4,11 +4,16 @@
  * Builds every screen from what the Home Assistant WS plugin itself
  * declares (Pebble.enumeratePlugins), so a source or action added to the
  * plugin shows up here without a change. The watch half only draws menus,
- * text and bitmaps; see src/c/main.c for the commands.
+ * text, bitmaps and number selectors; see src/c/main.c for the commands.
+ *
+ * Home is the exception: it is built the way the Home Assistant WS app shows
+ * entities, with a details page per kind, so the plugin can be tried the way
+ * an app would use it.
  */
 var HA = '61ae3254-ce00-49db-aad8-23143f649b90';
 
-var CMD = { MENU: 1, ROWS: 2, TEXT: 3, APPEND: 4, IMAGE: 5, PIXELS: 6, STATUS: 8, DICTATE: 10 };
+var CMD = { MENU: 1, ROWS: 2, TEXT: 3, APPEND: 4, IMAGE: 5, PIXELS: 6, STATUS: 8, DICTATE: 10, NUMBER: 11, VALUE: 12, CLOSE: 13 };
+var VIBE = { NONE: 0, SHORT: 1, DOUBLE: 2 };
 var MAX_ROWS = 64;
 //! Bytes of text or pixels in one message, well inside the watch's inbox
 var CHUNK = 900;
@@ -154,8 +159,53 @@ function image(title, caption, shape) {
   return screen;
 }
 
-function status(message) {
-  send({ cmd: CMD.STATUS, text: clean(message, 90) });
+/** A banner on the top screen; it buzzes once unless `vibe` says otherwise */
+function status(message, vibe) {
+  var out = { cmd: CMD.STATUS, text: clean(message, 90) };
+  if (vibe !== undefined) { out.vibe = vibe; }
+  send(out);
+}
+
+function buzz(vibe) {
+  send({ cmd: CMD.STATUS, text: '', vibe: vibe });
+}
+
+function closeScreen(screen) {
+  if (screens[screen.id]) { send({ cmd: CMD.CLOSE, screen: screen.id }); }
+}
+
+/**
+ * A number selector, the Home Assistant WS app's NumberField. Up and down
+ * run on the watch; values cross as integers scaled by 10^decimals.
+ *
+ *   numberSelector({ title, unit, value, min, max, step, decimals, bar,
+ *                    onChange, onSet })
+ *
+ * onChange(value) makes it live: the watch reports each value once it has
+ * settled. onSet(value) is select; close the selector when the value took.
+ * The returned screen's value(v) shows a value from elsewhere, which the
+ * watch ignores while the wearer is pressing buttons.
+ */
+function numberSelector(options) {
+  var decimals = options.decimals || 0;
+  var scale = Math.pow(10, decimals);
+  function scaled(v) { return Math.round(v * scale); }
+  var screen = { id: nextId++, kind: 'number' };
+  screens[screen.id] = screen;
+  screen.onChange = options.onChange ? function(v) { options.onChange(v / scale); } : null;
+  screen.onSet = function(v) { options.onSet(v / scale); };
+  screen.value = function(v) {
+    if (screens[screen.id] && typeof v === 'number' && isFinite(v)) {
+      send({ cmd: CMD.VALUE, screen: screen.id, value: scaled(v) });
+    }
+  };
+  send({
+    cmd: CMD.NUMBER, screen: screen.id, title: clean(options.title, 30), unit: clean(options.unit || '', 10),
+    value: scaled(typeof options.value === 'number' && isFinite(options.value) ? options.value : options.min),
+    min: scaled(options.min), max: scaled(options.max), step: Math.max(1, scaled(options.step || 1)),
+    decimals: decimals, flags: (options.bar ? 1 : 0) | (options.onChange ? 8 : 0)
+  });
+  return screen;
 }
 
 // ---- Reading the plugin ------------------------------------------------------
@@ -240,6 +290,19 @@ function errorRows(err, retry) {
 function numberOf(instance, name) {
   var shapes = instance && instance.properties && instance.properties[name];
   return shapes && shapes.numericValue ? shapes.numericValue.value : null;
+}
+
+//! Whether the entity's supported_features has `bit`; true when it sends none
+function supports(instance, bit) {
+  var features = numberOf(instance, 'supported_features');
+  return features === null || (features & bit) !== 0;
+}
+
+//! A comma separated list the plugin sends as longText, or null without one
+function listOf(instance, name) {
+  var shapes = instance && instance.properties && instance.properties[name];
+  var text = shapes && shapes.longText ? shapes.longText.text : '';
+  return text ? text.split(',') : null;
 }
 
 //! A few sets of arguments worth trying for each action, besides instanceId
@@ -410,7 +473,9 @@ function instanceScreen(category, item, instance) {
 
 /**
  * A live list of a source's instances. It redraws when the source sends an
- * update, and stops listening when the watch leaves it.
+ * update, and stops listening when the watch leaves it. `options.row` builds
+ * an instance's row in place of the raw one, and `options.filter` leaves
+ * instances out.
  */
 function sourceScreen(category, item, options) {
   options = options || {};
@@ -433,18 +498,28 @@ function sourceScreen(category, item, options) {
       });
     }
     instances.forEach(function(instance) {
+      if (options.filter && !options.filter(instance)) { return; }
+      if (options.row) { return rows.push(options.row(instance)); }
       rows.push({
         title: propertyText(instance, 'name') || instance.instanceId,
         subtitle: instanceSummary(instance),
         select: function() {
           if (options.onPick) { options.onPick(instance); } else { instanceScreen(category, item, instance); }
         },
-        hold: function() { text(instance.instanceId, json(instance)); }
+        // As in the app, holding an entity does its quick action. Its raw
+        // reply is under Id once it is open.
+        hold: function() {
+          if (category !== 'home' || !quickAction(instance)) { text(instance.instanceId, json(instance)); }
+        }
       });
     });
     if (rows.length === 0) { rows.push({ title: 'No instances', subtitle: 'Nothing shared of this kind' }); }
     var signature = JSON.stringify(rows.map(function(r) { return [r.title, r.subtitle]; }));
-    if (signature === last && screens[screen.id] && screens[screen.id].rows.length) { return; }
+    if (signature === last && screens[screen.id] && screens[screen.id].rows.length) {
+      // Same on the watch, but the rows' handlers get the newest instances
+      screen.rows = rows.slice(0, MAX_ROWS);
+      return;
+    }
     last = signature;
     if (screens[screen.id]) { menu(title, rows, screen); }
   }
@@ -706,8 +781,594 @@ function allActionsMenu() {
   }));
 }
 
+// ---- Home, the way the app shows it ------------------------------------------
+//
+// The shared entities as the Home Assistant WS app lists them: the name with
+// the state under it. Select opens the entity's details page, built from its
+// own home/<item> source and following it while it is open. Holding select
+// does its quick action, as the app's EntityService.quickAction does, and
+// opens the details where there is none.
+
+//! Which home/<item> each domain is served under, as in the plugin's entities.js
+var ITEM_BY_DOMAIN = {
+  light: 'light', switch: 'switch', input_boolean: 'switch', fan: 'switch', automation: 'switch',
+  siren: 'switch', humidifier: 'switch', remote: 'switch', sensor: 'sensor', number: 'sensor',
+  input_number: 'sensor', counter: 'sensor', binary_sensor: 'binary_sensor', climate: 'climate',
+  water_heater: 'climate', cover: 'cover', valve: 'cover', lock: 'lock', media_player: 'media_player',
+  person: 'person', device_tracker: 'person', scene: 'scene', script: 'scene', button: 'scene',
+  input_button: 'scene', alarm_control_panel: 'alarm'
+};
+
+//! The app toggles these from a list (automations too, its default)
+var TOGGLES = {
+  light: true, switch: true, input_boolean: true, fan: true, humidifier: true, siren: true,
+  remote: true, automation: true
+};
+
+//! And runs or presses these
+var ACTIVATES = { scene: true, script: true, button: true, input_button: true };
+
+//! In the app's order, with Home Assistant's AlarmControlPanelEntityFeature bit for each
+var ARM_MODES = [['away', 'Arm Away', 2], ['home', 'Arm Home', 1], ['night', 'Arm Night', 4],
+  ['vacation', 'Arm Vacation', 32], ['custom_bypass', 'Arm Custom', 16]];
+
+//! CoverEntityFeature, which valves share for these four
+var COVER_OPEN = 1, COVER_CLOSE = 2, COVER_POSITION = 4, COVER_STOP = 8;
+
+var HVAC_MODES = ['off', 'heat', 'cool', 'heat_cool', 'auto', 'dry', 'fan_only'];
+
+function domainOf(instance) { return instance.instanceId.split('.')[0]; }
+
+function nameOf(instance) { return propertyText(instance, 'name') || instance.instanceId; }
+
+function boolOf(instance, name) {
+  var shapes = instance && instance.properties && instance.properties[name];
+  return shapes && shapes.boolean ? shapes.boolean.value : null;
+}
+
+function timeOf(instance, name) {
+  var shapes = instance && instance.properties && instance.properties[name];
+  return shapes && shapes.timestamp ? timeText(shapes.timestamp.value) : '';
+}
+
+function humanize(state) {
+  var words = String(state).replace(/_/g, ' ');
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
+
+//! "On > 14:02", the way the app puts the state and when it changed
+function stateLine(state, instance) {
+  var since = timeOf(instance, 'last_changed');
+  return state + (since ? ' > ' + since : '');
+}
+
+/**
+ * Call an action the way the app calls a service: a short buzz when it
+ * worked, and the banner with the code and a double buzz when it did not.
+ * Quiet ones (a live selector following the dial) only show the banner.
+ */
+function act(action, args, onDone, quiet) {
+  function done(result) {
+    log(action + ' ' + JSON.stringify(args) + ' -> ' + JSON.stringify(result));
+    if (result.ok) {
+      if (!quiet) { buzz(VIBE.SHORT); }
+    } else {
+      status((result.code || 'ERROR') + ': ' + (result.message || ''), quiet ? VIBE.NONE : VIBE.DOUBLE);
+    }
+    if (onDone) { onDone(result); }
+  }
+  try {
+    Pebble.invokeAction({ plugin: HA, action: action, args: args }).then(done, function(err) {
+      done({ ok: false, code: 'REJECTED', message: String(err && err.message || err) });
+    });
+  } catch (e) {
+    done({ ok: false, code: 'THROWN', message: String(e) });
+  }
+}
+
+//! A row that only acts on a long press, like the rest of the tester
+function holdRow(title, subtitle, action, args) {
+  return {
+    title: title + ' (hold)',
+    subtitle: subtitle,
+    select: function() { status('Hold select to really ' + action.replace('_', ' ')); },
+    hold: function() { act(action, args); }
+  };
+}
+
+/**
+ * The entity's quick action, as the app's quickAction picks it. False when
+ * it has none in the state it is in, and nothing was done. Unlocking and
+ * disarming never happen from a list: the details page has them.
+ */
+function quickAction(instance) {
+  var id = instance.instanceId;
+  var domain = domainOf(instance);
+  var state = propertyText(instance, 'state');
+  if (state === 'Unavailable' || state === 'Unknown') { return false; }
+  var target = { instanceId: id };
+  if (TOGGLES[domain]) { act('toggle', target); return true; }
+  if (ACTIVATES[domain]) { act('activate', target); return true; }
+  if (domain === 'cover' || domain === 'valve') {
+    // Open or close by what it is now; set_on opens without the open
+    // action's asking, and refuses a garage door, gate or door
+    var open = boolOf(instance, 'on');
+    if (open === null || !supports(instance, open ? COVER_CLOSE : COVER_OPEN)) { return false; }
+    act('set_on', { instanceId: id, on: !open });
+    return true;
+  }
+  if (domain === 'lock') {
+    if (state !== 'Unlocked' && state !== 'Open') { return false; }
+    act('lock', target);
+    return true;
+  }
+  if (domain === 'alarm_control_panel') {
+    if (state !== 'Disarmed') { return false; }
+    // The first mode it has, as the app picks it
+    var modes = ARM_MODES.filter(function(mode) { return supports(instance, mode[2]); });
+    if (modes.length === 0) { return false; }
+    act('alarm_arm', { instanceId: id, mode: modes[0][0] });
+    return true;
+  }
+  if (domain === 'select' || domain === 'input_select') {
+    act('call_service', { instanceId: id, service: 'select_next' });
+    return true;
+  }
+  if (domain === 'counter') {
+    act('call_service', { instanceId: id, service: 'increment' });
+    return true;
+  }
+  return false;
+}
+
+/**
+ * A number selector for a details page. `follow(instance)` is the value the
+ * entity has now; the page passes it on while the selector is open. `call(v)`
+ * is [action, args] for a value. Select calls it and closes on success;
+ * `live` calls it as the dial settles, as the app does for lights.
+ */
+function dial(page, options) {
+  function run(value, onDone, quiet) {
+    var call = options.call(value);
+    act(call[0], call[1], onDone, quiet);
+  }
+  var selector = numberSelector({
+    title: options.title,
+    unit: options.unit,
+    value: options.follow(page.instance),
+    min: options.min,
+    max: options.max,
+    step: options.step,
+    decimals: options.decimals,
+    bar: true,
+    onChange: options.live ? function(value) { run(value, null, true); } : null,
+    onSet: function(value) {
+      // Left up on failure so the value can be tried again
+      run(value, function(result) { if (result.ok) { closeScreen(selector); } });
+    }
+  });
+  selector.onClose = function() {
+    if (page.selector === selector) { page.selector = null; }
+  };
+  page.selector = selector;
+  page.follow = options.follow;
+}
+
+function temperatureUnit(instance) {
+  var shapes = instance.properties.current_temperature || instance.properties.target_temperature;
+  var unit = shapes && shapes.numericValue && shapes.numericValue.unit;
+  return /F/.test(unit || '') ? '°F' : '°C';
+}
+
+//! A heat_cool thermostat's range
+function rangeOf(instance) {
+  var low = numberOf(instance, 'target_temp_low');
+  var high = numberOf(instance, 'target_temp_high');
+  return low !== null && high !== null ? { low: low, high: high } : null;
+}
+
+function hvacMenu(instance) {
+  var current = propertyText(instance, 'hvac_mode');
+  var screen = menu('HVAC Mode', (listOf(instance, 'hvac_modes') || HVAC_MODES).map(function(mode) {
+    return {
+      title: humanize(mode),
+      subtitle: humanize(mode) === current ? 'Current' : '',
+      select: function() {
+        act('set_hvac_mode', { instanceId: instance.instanceId, hvac_mode: mode }, function(result) {
+          if (result.ok) { closeScreen(screen); }
+        });
+      }
+    };
+  }));
+}
+
+/**
+ * The details pages, one per item, modelled on the app's pages under
+ * src/js/app/pages/entity/. Each builds its rows from the newest instance;
+ * their handlers read page.instance so they never act on an old one.
+ */
+var PAGES = {
+  light: function(instance, page) {
+    var id = instance.instanceId;
+    var on = boolOf(instance, 'on');
+    var modes = listOf(instance, 'color_modes');
+    var rows = [{
+      title: nameOf(instance),
+      subtitle: stateLine(propertyText(instance, 'on'), instance),
+      select: function() { act('toggle', { instanceId: id }); }
+    }];
+    // onoff alone cannot dim, and the plugin would refuse
+    var dims = !modes || modes.some(function(mode) { return mode !== 'onoff'; });
+    if (dims) {
+      rows.push({
+        title: 'Brightness',
+        subtitle: on ? numberOf(instance, 'brightness') + '%' : 'NA',
+        select: function() {
+          dial(page, {
+            title: 'Brightness', unit: '%', min: 0, max: 100, step: 1, live: true,
+            follow: function(now) { return boolOf(now, 'on') ? numberOf(now, 'brightness') : 0; },
+            call: function(value) { return ['set_brightness', { instanceId: id, percent: value }]; }
+          });
+        }
+      });
+    }
+    // color_temp only comes while the light is on in that mode
+    var temp = (instance.properties.color_temp && instance.properties.color_temp.numericValue) ||
+      (modes && modes.indexOf('color_temp') !== -1 ? {} : null);
+    if (temp) {
+      // No action of its own: call_service turn_on carries it
+      var min = temp.min !== undefined ? temp.min : 2000;
+      var max = temp.max !== undefined ? temp.max : 6500;
+      rows.push({
+        title: 'Color Temperature',
+        subtitle: on && temp.value !== undefined ? temp.value + 'K' : 'NA',
+        select: function() {
+          dial(page, {
+            title: 'Color Temp', unit: 'K', min: min, max: max, step: 50, live: true,
+            follow: function(now) {
+              var value = numberOf(now, 'color_temp');
+              return value !== null ? value : Math.round((min + max) / 2);
+            },
+            call: function(value) {
+              return ['call_service', { instanceId: id, service: 'turn_on', data: { color_temp_kelvin: value } }];
+            }
+          });
+        }
+      });
+    }
+    return rows;
+  },
+
+  switch: function(instance, page) {
+    var id = instance.instanceId;
+    var rows = [{
+      title: nameOf(instance),
+      subtitle: stateLine(propertyText(instance, 'on'), instance),
+      select: function() { act('toggle', { instanceId: id }); }
+    }];
+    if (instance.properties.speed) {
+      rows.push({
+        title: 'Speed',
+        subtitle: propertyText(instance, 'speed'),
+        select: function() {
+          dial(page, {
+            title: 'Speed', unit: '%', min: 0, max: 100, step: 1,
+            follow: function(now) { return numberOf(now, 'speed'); },
+            call: function(value) {
+              return ['call_service', { instanceId: id, service: 'set_percentage', data: { percentage: value } }];
+            }
+          });
+        }
+      });
+    }
+    if (domainOf(instance) === 'automation') {
+      rows.push({ title: 'Trigger', subtitle: 'activate', select: function() { act('activate', { instanceId: id }); } });
+    }
+    return rows;
+  },
+
+  sensor: function(instance) {
+    var rows = [{ title: 'Value', subtitle: propertyText(instance, 'value') }];
+    if (instance.properties.device_class) {
+      rows.push({ title: 'Device class', subtitle: propertyText(instance, 'device_class') });
+    }
+    rows.push({ title: 'Last changed', subtitle: timeOf(instance, 'last_changed') });
+    return rows;
+  },
+
+  binary_sensor: function(instance) {
+    var rows = [{ title: 'State', subtitle: propertyText(instance, 'state') }];
+    if (instance.properties.device_class) {
+      rows.push({ title: 'Device class', subtitle: propertyText(instance, 'device_class') });
+    }
+    rows.push({ title: 'Last changed', subtitle: timeOf(instance, 'last_changed') });
+    return rows;
+  },
+
+  person: function(instance) {
+    return [
+      { title: 'Zone', subtitle: propertyText(instance, 'zone') },
+      { title: 'Since', subtitle: timeOf(instance, 'since') }
+    ];
+  },
+
+  scene: function(instance) {
+    var id = instance.instanceId;
+    var domain = domainOf(instance);
+    var pressed = domain === 'button' || domain === 'input_button';
+    var rows = [{
+      title: pressed ? 'Press' : 'Run',
+      subtitle: nameOf(instance),
+      select: function() { act('activate', { instanceId: id }); }
+    }];
+    if (boolOf(instance, 'running')) {
+      rows.push({ title: 'Stop', subtitle: 'running now', select: function() { act('set_on', { instanceId: id, on: false }); } });
+    }
+    rows.push({ title: pressed ? 'Last pressed' : 'Last run', subtitle: timeOf(instance, 'last_run') || 'never' });
+    return rows;
+  },
+
+  cover: function(instance, page) {
+    var id = instance.instanceId;
+    var position = numberOf(instance, 'position');
+    var rows = [
+      { title: nameOf(instance), subtitle: stateLine(propertyText(instance, 'state') + (position !== null ? ' ' + position + '%' : ''), instance) },
+    ];
+    if (supports(instance, COVER_OPEN)) {
+      rows.push({
+        title: 'Open',
+        subtitle: 'hold: the open action, which asks',
+        select: function() { act('set_on', { instanceId: id, on: true }); },
+        hold: function() { act('open', { instanceId: id }); }
+      });
+    }
+    if (supports(instance, COVER_CLOSE)) { rows.push({ title: 'Close', select: function() { act('close', { instanceId: id }); } }); }
+    if (supports(instance, COVER_STOP)) { rows.push({ title: 'Stop', select: function() { act('stop', { instanceId: id }); } }); }
+    if (position !== null && supports(instance, COVER_POSITION)) {
+      rows.push({
+        title: 'Position',
+        subtitle: position + '%',
+        select: function() {
+          dial(page, {
+            title: 'Position', unit: '%', min: 0, max: 100, step: 1,
+            follow: function(now) { return numberOf(now, 'position'); },
+            call: function(value) { return ['set_position', { instanceId: id, position: value }]; }
+          });
+        }
+      });
+    }
+    return rows;
+  },
+
+  climate: function(instance, page) {
+    var id = instance.instanceId;
+    var fahrenheit = temperatureUnit(instance) === '°F';
+    // The thermostat's own step, else the frontend's defaults as the app has them
+    var step = numberOf(instance, 'temperature_step') || (fahrenheit ? 1 : 0.5);
+    var target = instance.properties.target_temperature && instance.properties.target_temperature.numericValue;
+    var min = target && target.min !== undefined ? target.min : (fahrenheit ? 45 : 7);
+    var max = target && target.max !== undefined ? target.max : (fahrenheit ? 95 : 35);
+    function temperatureDial(title, follow, call) {
+      dial(page, { title: title, unit: '°', min: min, max: max, step: step, decimals: step % 1 ? 1 : 0, follow: follow, call: call });
+    }
+    var rows = [{
+      title: nameOf(instance),
+      subtitle: stateLine(propertyText(instance, 'summary'), instance),
+      select: function() { act('toggle', { instanceId: id }); }
+    }];
+    if (instance.properties.current_temperature) {
+      rows.push({ title: 'Current', subtitle: propertyText(instance, 'current_temperature') });
+    }
+    var range = rangeOf(instance);
+    if (target) {
+      rows.push({
+        title: 'Target',
+        subtitle: target.value + '°',
+        select: function() {
+          temperatureDial('Target', function(now) { return numberOf(now, 'target_temperature'); },
+            function(value) { return ['set_temperature', { instanceId: id, temperature: value }]; });
+        }
+      });
+    } else if (range) {
+      // Each end keeps the other where it is now
+      rows.push({
+        title: 'Low',
+        subtitle: range.low + '°',
+        select: function() {
+          temperatureDial('Low', function(now) { var r = rangeOf(now); return r && r.low; }, function(value) {
+            var r = rangeOf(page.instance) || range;
+            return ['set_temperature', { instanceId: id, target_temp_low: value, target_temp_high: r.high }];
+          });
+        }
+      }, {
+        title: 'High',
+        subtitle: range.high + '°',
+        select: function() {
+          temperatureDial('High', function(now) { var r = rangeOf(now); return r && r.high; }, function(value) {
+            var r = rangeOf(page.instance) || range;
+            return ['set_temperature', { instanceId: id, target_temp_low: r.low, target_temp_high: value }];
+          });
+        }
+      });
+    }
+    if (domainOf(instance) === 'climate') {
+      rows.push({ title: 'HVAC Mode', subtitle: propertyText(instance, 'hvac_mode'), select: function() { hvacMenu(page.instance); } });
+    }
+    if (instance.properties.hvac_action) {
+      rows.push({ title: 'Action', subtitle: propertyText(instance, 'hvac_action') });
+    }
+    return rows;
+  },
+
+  media_player: function(instance, page) {
+    var id = instance.instanceId;
+    var playing = boolOf(instance, 'playing');
+    var off = propertyText(instance, 'state') === 'Off';
+    var rows = [{
+      title: nameOf(instance),
+      subtitle: stateLine(propertyText(instance, 'state'), instance),
+      select: function() { act('set_playing', { instanceId: id, playing: !playing }); }
+    }];
+    if (instance.properties.title) { rows.push({ title: 'Title', subtitle: propertyText(instance, 'title') }); }
+    if (instance.properties.artist) { rows.push({ title: 'Artist', subtitle: propertyText(instance, 'artist') }); }
+    rows.push(
+      { title: playing ? 'Pause' : 'Play', select: function() { act('set_playing', { instanceId: id, playing: !playing }); } },
+      { title: 'Next', select: function() { act('next_track', { instanceId: id }); } },
+      { title: 'Previous', select: function() { act('previous_track', { instanceId: id }); } }
+    );
+    if (instance.properties.volume) {
+      rows.push({
+        title: 'Volume',
+        subtitle: propertyText(instance, 'volume'),
+        select: function() {
+          dial(page, {
+            title: 'Volume', unit: '%', min: 0, max: 100, step: 1,
+            follow: function(now) { return numberOf(now, 'volume'); },
+            call: function(value) { return ['set_volume', { instanceId: id, percent: value }]; }
+          });
+        }
+      });
+    }
+    rows.push({ title: off ? 'Turn On' : 'Turn Off', select: function() { act('set_on', { instanceId: id, on: off }); } });
+    return rows;
+  },
+
+  lock: function(instance) {
+    var id = instance.instanceId;
+    return [
+      { title: nameOf(instance), subtitle: stateLine(propertyText(instance, 'state'), instance) },
+      { title: 'Lock', select: function() { act('lock', { instanceId: id }); } },
+      holdRow('Unlock', 'needs Apps Can Unlock', 'unlock', { instanceId: id }),
+      holdRow('Open', 'unlatch, needs Apps Can Unlock', 'open', { instanceId: id })
+    ];
+  },
+
+  alarm: function(instance) {
+    var id = instance.instanceId;
+    var rows = [{ title: nameOf(instance), subtitle: stateLine(propertyText(instance, 'state'), instance) }];
+    ARM_MODES.forEach(function(mode) {
+      if (!supports(instance, mode[2])) { return; }
+      rows.push({ title: mode[1], subtitle: 'alarm_arm ' + mode[0], select: function() { act('alarm_arm', { instanceId: id, mode: mode[0] }); } });
+    });
+    rows.push(holdRow('Disarm', 'needs Apps Can Unlock', 'alarm_disarm', { instanceId: id }));
+    return rows;
+  },
+
+  //! Whatever has no page of its own, from home/entity
+  entity: function(instance) {
+    var id = instance.instanceId;
+    var rows = [
+      { title: 'State', subtitle: stateLine(propertyText(instance, 'state'), instance) },
+      { title: 'Domain', subtitle: propertyText(instance, 'domain') }
+    ];
+    if (boolOf(instance, 'on') !== null) {
+      rows.push({ title: 'Toggle', subtitle: boolOf(instance, 'on') ? 'on now' : 'off now', select: function() { act('toggle', { instanceId: id }); } });
+    }
+    rows.push({
+      title: 'Every action…',
+      subtitle: 'including ones meant for other kinds',
+      select: function() { menu('All on ' + id, actionRows(entityActions(), instance)); }
+    });
+    return rows;
+  }
+};
+
+/**
+ * An entity's details page. It follows the entity's own home/<item> source
+ * while it is open, redrawing when it changes and passing the new value to
+ * an open selector, and stops when the watch leaves it.
+ */
+function entityPage(entity) {
+  var id = entity.instanceId;
+  var item = ITEM_BY_DOMAIN[domainOf(entity)] || 'entity';
+  var build = PAGES[item];
+  var title = clean(nameOf(entity), 30);
+  var page = { instance: entity, selector: null, follow: null };
+  var screen = menu(title, []);
+  var subscription = null;
+  var last = '';
+
+  function rawRow() {
+    return {
+      title: 'Properties & tests',
+      subtitle: 'home/' + item + ' raw, and its actions',
+      select: function() { instanceScreen('home', item, page.instance); }
+    };
+  }
+
+  function draw(instance) {
+    var rows;
+    if (instance) {
+      page.instance = instance;
+      rows = build(instance, page).concat([rawRow()]);
+      if (page.selector && screens[page.selector.id]) { page.selector.value(page.follow(instance)); }
+    } else {
+      rows = [{ title: 'Not shared now', subtitle: id + ' is not in home/' + item }];
+    }
+    var signature = JSON.stringify(rows.map(function(r) { return [r.title, r.subtitle]; }));
+    if (signature === last) {
+      screen.rows = rows;
+      return;
+    }
+    last = signature;
+    menu(title, rows, screen);
+  }
+
+  function start() {
+    try {
+      subscription = Pebble.subscribeToSource({
+        plugin: HA,
+        category: 'home',
+        item: item,
+        onData: function(envelope) {
+          if (!screens[screen.id]) { return; }
+          var found = null;
+          ((envelope && envelope.instances) || []).forEach(function(instance) {
+            if (instance.instanceId === id) { found = instance; }
+          });
+          draw(found);
+        },
+        onError: function(err) {
+          log('home/' + item + ' error ' + JSON.stringify(err));
+          last = '';
+          if (screens[screen.id]) { menu(title, errorRows(err, restart), screen); }
+        }
+      });
+    } catch (e) {
+      menu(title, errorRows({ code: 'THROWN', message: String(e) }), screen);
+    }
+  }
+
+  function restart() {
+    if (subscription) { subscription.unsubscribe(); }
+    last = '';
+    menu(title, [], screen);
+    start();
+  }
+
+  screen.onClose = function() { if (subscription) { subscription.unsubscribe(); } };
+  start();
+}
+
+function homeMenu() {
+  sourceScreen('home', 'entity', {
+    title: 'Home',
+    // Weather has its own menu, and nothing to do here
+    filter: function(instance) { return domainOf(instance) !== 'weather'; },
+    row: function(instance) {
+      return {
+        title: nameOf(instance),
+        subtitle: propertyText(instance, 'state'),
+        select: function() { entityPage(instance); },
+        hold: function() { if (!quickAction(instance)) { entityPage(instance); } }
+      };
+    }
+  });
+}
+
 function mainMenu() {
   menu('HA Plugin Tester', [
+    { title: 'Home', subtitle: 'your entities, as the app shows them', select: homeMenu },
     { title: 'Plugin & permissions', subtitle: 'is it there, what it needs', select: statusScreen },
     { title: 'Entities', subtitle: 'every home/* source and its actions', select: entitiesMenu },
     { title: 'Weather', subtitle: 'current, series, pictures, sun', select: weatherMenu },
@@ -737,6 +1398,17 @@ Pebble.addEventListener('appmessage', function(e) {
     var done = dictationDone;
     dictationDone = null;
     if (done) { done(p.dictation); }
+    return;
+  }
+  if (p.change !== undefined || p.set !== undefined) {
+    var selector = screens[p.change !== undefined ? p.change : p.set];
+    var report = selector && (p.change !== undefined ? selector.onChange : selector.onSet);
+    try {
+      if (report) { report(p.value); }
+    } catch (err) {
+      log('selector failed: ' + (err && err.stack || err));
+      status('Tester error: ' + err);
+    }
     return;
   }
   if (p.back !== undefined) {

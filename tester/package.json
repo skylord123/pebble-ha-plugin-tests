@@ -45,7 +45,17 @@
       "ready",
       "color",
       "mic",
-      "dictation"
+      "dictation",
+      "vibe",
+      "unit",
+      "value",
+      "min",
+      "max",
+      "step",
+      "decimals",
+      "flags",
+      "change",
+      "set"
     ],
     "resources": {
       "media": []
